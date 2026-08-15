@@ -183,7 +183,7 @@ class SklandAPI:
         padded_data = data + (b"\x00" * padding_len)
 
         # Use 8-byte key for single DES
-            key_8 = key[:8].ljwt(8, b"\x00")
+        key_8 = key[:8].ljust(8, b"\x00")
 
         cipher = DES.new(key_8, DES.MODE_ECB)
         result = b""
@@ -407,7 +407,7 @@ class SklandAPI:
     async def get_binding_list(self, cred: Credential) -> list[UserBinding]:
         """Get user's game bindings"""
         did = await self.get_device_id()
-        url = "https://zonai.sland.com/api/v1/game/player/binding"
+        url = "https://zonai.skland.com/api/v1/game/player/binding"
         headers = self._get_signed_headers(url, "GET", None, cred, did)
 
         response = await self._request("GET", url, headers=headers)
@@ -415,8 +415,8 @@ class SklandAPI:
         if response.get("code") != 0:
             msg = response.get("message", "Unknown error")
             if msg == "用户未登录":
-                raise Exception("用户登录嶳过期，移重新盻录")
-            raise Exception(f"苷取矻录列表1败: {msg}")
+                raise Exception("用户登录已过期，请重新登录")
+            raise Exception(f"获取绑定列表失败: {msg}")
 
         bindings = []
         for item in response.get("data", {}).get("list", []):
@@ -453,8 +453,8 @@ class SklandAPI:
             json_data={"gameId": binding.game_id, "uid": binding.uid},
         )
 
-        # Log the response for debugging
-        logger.info(f"[明日方舟] {binding.nickname} sign-in response: {json.dumps(response, ensure_ascii=False)}")
+        # 调试用：完整响应可能包含敏感字段，生产环境仅保留 debug 级别
+        logger.debug(f"[明日方舟] {binding.nickname} sign-in response: {json.dumps(response, ensure_ascii=False)}")
 
         if response.get("code") != 0:
             return SignInResult(
@@ -513,8 +513,8 @@ class SklandAPI:
             resp = await client.post(url, headers=headers)
             response = resp.json()
 
-            # Log the response for debugging
-            logger.info(f"[终末地] {role_nickname} sign-in response: {json.dumps(response, ensure_ascii=False)}")
+            # 调试用：完整响应可能包含敏感字段，生产环境仅保留 debug 级别
+            logger.debug(f"[终末地] {role_nickname} sign-in response: {json.dumps(response, ensure_ascii=False)}")
 
             if response.get("code") != 0:
                 results.append(
@@ -585,7 +585,13 @@ class SklandAPI:
 
     async def check_sign_in_status(self, user_token: str) -> tuple[dict[str, bool], str]:
         """
-        Check sign-in status without signing in
+        Check sign-in status.
+
+        注意：森空岛 API 不提供独立的"查询今日是否已签到"接口，本方法
+        内部实际调用 do_full_sign_in() 完成一次完整签到流程，再根据返回结果
+        判断各游戏是否已签到（已签到会返回"今日已签到"之类的信息）。
+        即：**每次查询状态等于一次签到尝试**，这是 API 设计限制下的取巧做法，
+        并非安全漏洞；对已经签到的账号不会造成重复签到。
 
         Returns: ({game: signed_today}, nickname)
         """

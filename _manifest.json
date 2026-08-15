@@ -1,0 +1,61 @@
+{
+  "manifest_version": 2,
+  "id": "github.cateye.skland.sign",
+  "version": "1.0.0",
+  "name": "森空岛签到",
+  "description": "森空岛（Skland）游戏自动签到插件：支持明日方舟与终末地，用户可通过指令或 LLM 工具绑定 token、手动签到、查看状态与开启每日自动签到。",
+  "author": {
+    "name": "cateye",
+    "url": "https://github.com/cateyemizuki"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/cateyemizuki/cateye_skland_sign",
+    "homepage": "https://github.com/cateyemizuki/cateye_skland_sign",
+    "documentation": "https://github.com/cateyemizuki/cateye_skland_sign/blob/main/README.md",
+    "issues": "https://github.com/cateyemizuki/cateye_skland_sign/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "httpx",
+      "version_spec": ">=0.25.0"
+    },
+    {
+      "type": "python_package",
+      "name": "pycryptodome",
+      "version_spec": ">=3.19.0"
+    },
+    {
+      "type": "python_package",
+      "name": "tomlkit",
+      "version_spec": ">=0.13.3"
+    }
+  ],
+  "plugin_type": "tool",
+  "display": {
+    "icon": {
+      "type": "local",
+      "value": "logo.png",
+      "fallback": "calendar-check"
+    }
+  },
+  "capabilities": [
+    "send.text",
+    "send.forward"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}

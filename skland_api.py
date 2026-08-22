@@ -425,15 +425,21 @@ class SklandAPI:
                 continue
 
             for binding in item.get("bindingList", []):
+                roles = binding.get("roles", []) or []
+                # 终末地等账号的绑定层 nickName 可能为空，昵称实际在角色列表里，
+                # 兜底取第一个角色的 nickname，避免昵称为空。
+                nickname = binding.get("nickName", "") or ""
+                if not nickname.strip() and roles:
+                    nickname = str(roles[0].get("nickname", "") or "").strip()
                 bindings.append(
                     UserBinding(
                         app_code=app_code,
                         game_name=binding.get("gameName", "Unknown"),
-                        nickname=binding.get("nickName", "Unknown"),
+                        nickname=nickname or "Unknown",
                         channel_name=binding.get("channelName", "Unknown"),
                         uid=binding.get("uid", ""),
                         game_id=binding.get("gameId", 1),
-                        roles=binding.get("roles", []),
+                        roles=roles,
                     )
                 )
 

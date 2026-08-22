@@ -8,7 +8,8 @@
 
 ## 功能特性
 
-- **Token 绑定**：支持完整 JSON（`{"code":0,"data":{"content":"..."}}`）或纯 Base64 字符串两种输入格式。
+- **Token 绑定**：支持完整 JSON（`{"code":0,"data":{"content":"..."}}`）或纯 Base64 字符串两种输入格式。绑定成功后**默认开启每日自动签到**，并保存用户森空岛昵称用于后续消息显示。
+- **旧数据昵称自动补充**：插件每次启动与每日自动签到执行时，若发现旧版用户数据缺少森空岛昵称，会通过其已保存的 token 自动查询并写回（同一天最多执行一次；token 失效的用户保持原样，显示回退为 QQ 号）。
 - **手动签到**：指令 `/森空岛签到` 或对机器人说「帮我签到」。
 - **自动签到**：开启后每天按配置时间（北京时间，默认 `08:00`）自动为所有已开启的用户签到，结果仅记录日志，不打扰用户。
 - **签到状态查询**：查看今日各游戏是否已签到。
@@ -30,7 +31,7 @@
 ```toml
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.1.0"
 
 [auto_sign]
 time = "08:00"          # 每日自动签到时间（北京时间 HH:MM，分钟粒度，默认 08:00）
@@ -45,6 +46,7 @@ super_admins = ["123456789"]   # 超级管理员 QQ 号列表（管理指令权�
 - `auto_sign.time` 也可由超级管理员通过指令 `/森空岛定时 <时间>` 修改（会写回 `config.toml` 并热重载）。
 - `token.get_url` 为 token 获取链接，`skland_help` 工具与 `/森空岛` 指令均使用该链接（默认森空岛官方帖子链接，用户可自行替换）。
 - 旧版配置 `auto_sign_hour`（整数小时）会被自动兼容读取。
+- `plugin.config_version`（配置版本）与插件版本同步（`SUPPORTED_CONFIG_VERSION` 常量），用于检查配置文件是否需要更新，UI 中隐藏、不可手动修改。
 
 ## 使用说明
 
@@ -52,8 +54,8 @@ super_admins = ["123456789"]   # 超级管理员 QQ 号列表（管理指令权�
 
 | 指令 | 功能 | 权限 |
 |------|------|------|
-| `/森空岛`、`/森空岛帮助` | 固定回复：token 获取教程（含链接）+ 指令列表 | 所有人 |
-| `/森空岛绑定 <token>` | 绑定 token（支持完整 JSON 或纯 Base64） | 所有人 |
+| `/森空岛`、`/森空岛帮助` | 固定回复：token 获取教程（含链接）+ 指令列表（长内容使用单条合并转发返回，避免刷屏） | 所有人 |
+| `/森空岛绑定 <token>` | 绑定 token（支持完整 JSON 或纯 Base64），绑定成功后默认开启自动签到，回复「绑定成功！昵称：<森空岛名称> / 每天<时间>自动签到」 | 所有人 |
 | `/森空岛解绑` | 解绑并停止自动签到 | 所有人 |
 | `/森空岛签到` | 手动签到 | 所有人 |
 | `/森空岛状态` | 查看今日签到状态 | 所有人 |
@@ -81,8 +83,9 @@ super_admins = ["123456789"]   # 超级管理员 QQ 号列表（管理指令权�
 
 ## 数据存储
 
-- 插件 ID 为 `github.cateye.skland.sign`（Manifest 要求 id 以点号/横线分隔）；用户数据（token、自动签到开关）保存在统一持久化目录 `data/plugins/cateye_skland_sign/users.json`，该子文件夹固定为 `cateye_skland_sign`（与项目文件夹同名），不随插件 ID 变化，遵守官方建议、不使用插件目录下旧式 `data/` 目录。
+- 插件 ID 为 `github.cateye.skland.sign`（Manifest 要求 id 以点号/横线分隔）；用户数据（token、自动签到开关、森空岛昵称）保存在统一持久化目录 `data/plugins/cateye_skland_sign/users.json`，该子文件夹固定为 `cateye_skland_sign`（与项目文件夹同名），不随插件 ID 变化，遵守官方建议、不使用插件目录下旧式 `data/` 目录。
 - 首次加载时会自动迁移旧数据，按优先级：① 按插件 ID 派生的 `data/plugins/github.cateye.skland.sign/`；② 旧插件 ID（`maibot-community.skland-sign`）的持久化目录；③ 旧式插件目录 `data/users.json`（兼容纯字符串 token 旧格式）。
+- 旧版数据中缺少 `nickname` 字段的用户，插件会在**每次启动**与**每日自动签到执行时**后台自动查询森空岛昵称并补充写入（`_backfill_nicknames()`，同一天最多执行一次，用 `last_nickname_backfill.json` 记录），不改变其 token 与自动签到开关。
 - **token 即登录凭证，请勿提交到公开仓库**，`.gitignore` 已包含 `/config.toml` 与 `/data/`。
 
 ## 目录结构

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.cateye.skland.sign",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "森空岛签到",
   "description": "森空岛（Skland）游戏自动签到插件：支持明日方舟与终末地，用户可通过指令或 LLM 工具绑定 token、手动签到、查看状态与开启每日自动签到。",
   "author": {

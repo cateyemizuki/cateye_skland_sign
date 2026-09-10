@@ -32,7 +32,7 @@ TZ = timezone(timedelta(hours=8))
 # 配置版本（config_version）：与 _manifest.json 的 version 保持同步。
 # config_version 用于检查配置文件（config.toml）是否需要更新：
 # 插件升级后若配置结构发生变化，可对比该值触发配置迁移/重建。
-SUPPORTED_CONFIG_VERSION = "1.1.0"
+SUPPORTED_CONFIG_VERSION = "1.1.1"
 
 # 统一持久化目录的子文件夹名（data/plugins/cateye_skland_sign）。
 # 注意：manifest 的插件 ID 为 github.cateye.skland.sign（id 必须以点号/横线分隔），
@@ -79,11 +79,20 @@ def build_help_text(token_url: str) -> str:
 
 
 class PluginSectionConfig(PluginConfigBase):
+    """插件自身配置（plugin 配置节）。"""
+
     __ui_label__ = "插件"
     __ui_icon__ = "package"
     __ui_order__ = 0
 
-    enabled: bool = Field(default=True, description="是否启用插件")
+    enabled: bool = Field(
+        default=True,
+        description="是否启用插件",
+        json_schema_extra={
+            "label": "启用插件",
+            "hint": "插件总开关",
+        },
+    )
     config_version: str = Field(
         default=SUPPORTED_CONFIG_VERSION,
         description="配置版本（与插件版本同步，用于检查配置文件是否需要更新）",
@@ -91,19 +100,31 @@ class PluginSectionConfig(PluginConfigBase):
             "disabled": True,
             "hidden": True,
             "label": "配置版本",
+            "hint": "配置版本，勿改",
         },
     )
 
 
 class AutoSignSectionConfig(PluginConfigBase):
+    """自动签到设置（auto_sign 配置节）。"""
+
     __ui_label__ = "自动签到"
     __ui_icon__ = "alarm"
     __ui_order__ = 1
 
-    time: str = Field(default="08:00", description="每日自动签到时间（北京时间 HH:MM）")
+    time: str = Field(
+        default="08:00",
+        description="每日自动签到时间（北京时间 HH:MM）",
+        json_schema_extra={
+            "label": "自动签到时间",
+            "hint": "每日自动签到时间",
+        },
+    )
 
 
 class TokenSectionConfig(PluginConfigBase):
+    """Token 获取（token 配置节）。"""
+
     __ui_label__ = "Token 获取"
     __ui_icon__ = "link"
     __ui_order__ = 2
@@ -111,15 +132,28 @@ class TokenSectionConfig(PluginConfigBase):
     get_url: str = Field(
         default=TOKEN_URL,
         description="森空岛 token 获取链接（浏览器打开后跳转登录，点击帖子内链接即可获取 token）",
+        json_schema_extra={
+            "label": "Token 获取链接",
+            "hint": "森空岛Token获取链接",
+        },
     )
 
 
 class AdminSectionConfig(PluginConfigBase):
+    """管理员设置（admin 配置节）。"""
+
     __ui_label__ = "管理员"
     __ui_icon__ = "shield"
     __ui_order__ = 3
 
-    super_admins: list[str] = Field(default_factory=list, description="超级管理员 QQ 号列表（可执行管理指令）")
+    super_admins: list[str] = Field(
+        default_factory=list,
+        description="超级管理员 QQ 号列表（可执行管理指令）",
+        json_schema_extra={
+            "label": "超级管理员",
+            "hint": "超级管理员QQ号",
+        },
+    )
 
 
 class SklandSignConfig(PluginConfigBase):

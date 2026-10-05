@@ -22,7 +22,7 @@
 2. 重启 MaiBot，或在 WebUI 插件中心安装。
 3. 插件依赖 `httpx`、`pycryptodome`、`tomlkit`，已声明于 `_manifest.json`，Host 会自动安装。
 
-> 兼容性声明：`host_application` `1.0.0 ~ 1.99.99`，`sdk` `2.0.0 ~ 2.99.99`（Manifest v2）。
+> 兼容性声明：兼容 **MaiBot 1.2.x 与 1.3.x**（`host_application` `1.0.0 ~ 1.99.99`，`sdk` `2.0.0 ~ 2.99.99`，Manifest v2）。
 
 ## 配置说明
 
@@ -31,7 +31,7 @@
 ```toml
 [plugin]
 enabled = true
-config_version = "1.1.0"
+config_version = "1.1.3"
 
 [auto_sign]
 time = "08:00"          # 每日自动签到时间（北京时间 HH:MM，分钟粒度，默认 08:00）
@@ -81,12 +81,18 @@ super_admins = ["123456789"]   # 超级管理员 QQ 号列表（管理指令权�
 
 > 工具仅在用户「明确要求」时调用（见各工具描述约束）。
 
+> **权限边界**：四个带 `user_id` 参数的工具**默认绑定当前消息的发送者**（参数留空即操作本人）；
+> 仅当发送者在配置 `admin.super_admins` 中时，才允许指定其他用户的 `user_id` 代为操作。
+> 普通群友无法通过对话代替他人绑定 token、签到、查询状态或开关自动签到，越权请求会被拒绝。
+
 ## 数据存储
 
 - 插件 ID 为 `github.cateye.skland.sign`（Manifest 要求 id 以点号/横线分隔）；用户数据（token、自动签到开关、森空岛昵称）保存在统一持久化目录 `data/plugins/cateye_skland_sign/users.json`，该子文件夹固定为 `cateye_skland_sign`（与项目文件夹同名），不随插件 ID 变化，遵守官方建议、不使用插件目录下旧式 `data/` 目录。
 - 首次加载时会自动迁移旧数据，按优先级：① 按插件 ID 派生的 `data/plugins/github.cateye.skland.sign/`；② 旧插件 ID（`maibot-community.skland-sign`）的持久化目录；③ 旧式插件目录 `data/users.json`（兼容纯字符串 token 旧格式）。
 - 旧版数据中缺少 `nickname` 字段的用户，插件会在**每次启动**与**每日自动签到执行时**后台自动查询森空岛昵称并补充写入（`_backfill_nicknames()`，同一天最多执行一次，用 `last_nickname_backfill.json` 记录），不改变其 token 与自动签到开关。
 - **token 即登录凭证，请勿提交到公开仓库**，`.gitignore` 已包含 `/config.toml` 与 `/data/`。
+- **token 以明文保存在宿主机的 `users.json` 中**（插件不做加密混淆）：文件写入时权限收紧为仅属主可读写（POSIX 下严格生效，Windows 下尽力收紧），但任何能读取宿主机数据目录的进程仍可获得全部 token，**请保护好宿主机**。解绑即删除对应用户的全部数据。
+- 绑定 / 签到 / 状态查询失败时，机器人仅回复简短可读的原因，完整异常细节只写入插件日志，不对外暴露上游响应结构。
 
 ## 目录结构
 

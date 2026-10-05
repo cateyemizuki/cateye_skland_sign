@@ -18,11 +18,12 @@ import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
+from .admin_util import collect_admins, plain_id
 from .skland_api import SklandAPI
 
 # ==================== 常量 ====================
@@ -32,7 +33,7 @@ TZ = timezone(timedelta(hours=8))
 # 配置版本（config_version）：与 _manifest.json 的 version 保持同步。
 # config_version 用于检查配置文件（config.toml）是否需要更新：
 # 插件升级后若配置结构发生变化，可对比该值触发配置迁移/重建。
-SUPPORTED_CONFIG_VERSION = "1.1.1"
+SUPPORTED_CONFIG_VERSION = "1.1.3"
 
 # 统一持久化目录的子文件夹名（data/plugins/cateye_skland_sign）。
 # 注意：manifest 的插件 ID 为 github.cateye.skland.sign（id 必须以点号/横线分隔），
@@ -78,10 +79,21 @@ def build_help_text(token_url: str) -> str:
 # ==================== 配置模型 ====================
 
 
+def _ui_i18n(en_label: str, en_hint: str = "") -> Dict[str, Any]:
+    """字段级英文翻译（并入 json_schema_extra；WebUI 按 i18n[locale]['label'/'hint'] 取用）。"""
+    entry: Dict[str, str] = {"label": en_label}
+    if en_hint:
+        entry["hint"] = en_hint
+    return {"i18n": {"en": entry}}
+
+
 class PluginSectionConfig(PluginConfigBase):
     """插件自身配置（plugin 配置节）。"""
 
     __ui_label__ = "插件"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Plugin", "description": "Plugin master switch."}
+    }
     __ui_icon__ = "package"
     __ui_order__ = 0
 
@@ -91,6 +103,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用插件",
             "hint": "插件总开关",
+            **_ui_i18n("Enable plugin", "Master switch of the plugin."),
         },
     )
     config_version: str = Field(
@@ -101,6 +114,7 @@ class PluginSectionConfig(PluginConfigBase):
             "hidden": True,
             "label": "配置版本",
             "hint": "配置版本，勿改",
+            **_ui_i18n("Config version", "Internal config version. Do not edit."),
         },
     )
 
@@ -109,6 +123,9 @@ class AutoSignSectionConfig(PluginConfigBase):
     """自动签到设置（auto_sign 配置节）。"""
 
     __ui_label__ = "自动签到"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Auto Sign-in", "description": "Daily automatic sign-in schedule."}
+    }
     __ui_icon__ = "alarm"
     __ui_order__ = 1
 
@@ -118,6 +135,7 @@ class AutoSignSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "自动签到时间",
             "hint": "每日自动签到时间",
+            **_ui_i18n("Auto sign-in time", "Daily time in Beijing time (HH:MM)."),
         },
     )
 
@@ -126,6 +144,9 @@ class TokenSectionConfig(PluginConfigBase):
     """Token 获取（token 配置节）。"""
 
     __ui_label__ = "Token 获取"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Token Guide", "description": "Where to obtain the Skland token."}
+    }
     __ui_icon__ = "link"
     __ui_order__ = 2
 
@@ -135,6 +156,7 @@ class TokenSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "Token 获取链接",
             "hint": "森空岛Token获取链接",
+            **_ui_i18n("Token guide URL", "URL explaining how to obtain the Skland token."),
         },
     )
 
@@ -143,6 +165,9 @@ class AdminSectionConfig(PluginConfigBase):
     """管理员设置（admin 配置节）。"""
 
     __ui_label__ = "管理员"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Administrators", "description": "Users allowed to run admin commands."}
+    }
     __ui_icon__ = "shield"
     __ui_order__ = 3
 
@@ -152,6 +177,7 @@ class AdminSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "超级管理员",
             "hint": "超级管理员QQ号",
+            **_ui_i18n("Super admins", "QQ IDs allowed to run admin commands."),
         },
     )
 
@@ -209,8 +235,19 @@ class UserDataManager:
 
     def _save_sync(self) -> None:
         os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
+        data = json.dumps(self._data, ensure_ascii=False, indent=2)
+        # token 属敏感数据：写文件时收紧权限到仅属主可读写（0o600）。
+        # POSIX 下严格生效；Windows 下 os.open 的 mode 仅尽力生效（不做加密混淆）。
+        try:
+            fd = os.open(self.data_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except OSError:
+            fd = None  # 极少数文件系统不支持时回退为普通写入，保证功能可用
+        if fd is not None:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+            return
         with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
+            f.write(data)
 
     def get(self, user_id: str) -> Dict[str, Any]:
         return self._data.get(str(user_id), {"token": None, "auto_sign": False, "nickname": ""})
@@ -323,6 +360,30 @@ def format_sign_results(results: List[Any]) -> List[str]:
             else:
                 lines.append(f"[X] {r.game}：{r.nickname}（签到失败：{r.error}）")
     return lines
+
+
+def sanitize_error(exc: BaseException) -> str:
+    """把异常转换为简短、可对外展示的原因（sanitize_error 风格）。
+
+    去除 URL / IP / HTTP 状态码 / 响应体等内部细节，只保留首行可读原因；
+    完整异常由调用方写入日志，本函数结果仅用于面向用户的消息与工具返回。
+    """
+    text = (str(exc) or "").strip()
+    if not text:
+        return "请求失败，请稍后重试"
+    text = text.splitlines()[0]
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "", text)
+    text = re.sub(r"HTTP\s*\d+", "", text, flags=re.IGNORECASE)
+    # 去除被截进异常文本的响应体 / 结构化数据（贪婪匹配以覆盖嵌套结构）
+    text = re.sub(r"\{.*\}", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    # 状态码被移除后残留的空括号
+    text = re.sub(r"[（(]\s*[)）]", "", text)
+    text = text.strip("：:，,- ").strip()
+    if not text:
+        return "请求失败，请稍后重试"
+    return text[:100]
 
 
 def to_bool(value: Any) -> bool:
@@ -661,9 +722,50 @@ class SklandSignPlugin(MaiBotPlugin):
                 return uid
         return str(message.get("user_id") or "").strip()
 
-    def _is_super_admin(self, user_id: str) -> bool:
-        admins = self.config.admin.super_admins
-        return str(user_id) in [str(a) for a in admins]
+    async def _get_super_admin_ids(self) -> List[str]:
+        """统一管理员判定（2026-09-29 二轮）：宿主管理员 ∪ 插件配置管理员。
+
+        - 宿主侧来源：ctx.config.get("plugin.permission", ...)（与命令权限同源）；
+          读取失败降级为仅插件配置（debug 日志，不抛异常）；
+        - 两路来源经 plain_id 归一为纯数字 ID 后按 ID 去重（插件配置值允许
+          携带 'qq:10001' 平台前缀，自动识别）；
+        - 合并后为空时调用方应拒绝（fail-closed），与原行为一致。
+        """
+        try:
+            perms = await self.ctx.config.get("plugin.permission", None)
+        except Exception as e:
+            self.ctx.logger.debug("读取宿主 plugin.permission 失败，降级为仅插件配置管理员：%s", e)
+            perms = None
+        return collect_admins(perms, self.config.admin.super_admins)
+
+    async def _is_super_admin(self, user_id: str) -> bool:
+        pid = plain_id(user_id)
+        if not pid:
+            return False
+        admins = await self._get_super_admin_ids()
+        return pid in admins
+
+    async def _resolve_tool_user_id(self, requested_uid: str, kwargs: Any) -> tuple[Optional[str], Optional[str]]:
+        """解析 LLM 工具的目标用户并做权限校验（防止代替任意用户操作）。
+
+        规则：
+        - 默认绑定当前消息发送者：user_id 为空或（归一后）等于发送者时，一律以发送者身份执行；
+        - 指定其他用户（代他人绑定 / 签到 / 查状态 / 开关自动签到）仅限超级管理员
+          （宿主管理员 ∪ admin.super_admins，纯 ID 去重判定）。
+
+        返回 (uid, error)：允许执行时 error 为 None；拒绝时 uid 为 None、error 为原因。
+        """
+        sender_id = self._extract_user_id(kwargs.get("message", {}))
+        uid = str(requested_uid or "").strip()
+        uid_pid = plain_id(uid)
+        sender_pid = plain_id(sender_id)
+        if not uid or (sender_pid and uid_pid == sender_pid):
+            if not sender_id:
+                return None, "无法获取当前消息的发送者标识，请改用 /森空岛绑定 等指令完成操作"
+            return sender_id, None
+        if await self._is_super_admin(sender_id):
+            return uid_pid or uid, None
+        return None, "不允许代替其他用户操作，请让该用户本人向机器人发起请求"
 
     # ==================== 发送辅助 ====================
 
@@ -761,8 +863,10 @@ class SklandSignPlugin(MaiBotPlugin):
             )
             return True, f"绑定成功：{nickname}", 2
         except Exception as e:
-            await self.ctx.send.text(f"绑定失败：{e}", str(kwargs.get("stream_id") or ""))
-            return False, f"绑定失败：{e}", 1
+            self.ctx.logger.warning("用户 %s 绑定失败：%s", user_id, e)
+            reason = sanitize_error(e)
+            await self.ctx.send.text(f"绑定失败：{reason}", str(kwargs.get("stream_id") or ""))
+            return False, f"绑定失败：{reason}", 1
         finally:
             await api.close()
 
@@ -803,8 +907,10 @@ class SklandSignPlugin(MaiBotPlugin):
             await self.ctx.send.text("\n".join(lines), str(kwargs.get("stream_id") or ""))
             return True, "\n".join(lines), 2
         except Exception as e:
-            await self.ctx.send.text(f"签到失败：{e}", str(kwargs.get("stream_id") or ""))
-            return False, f"签到失败：{e}", 1
+            self.ctx.logger.warning("用户 %s 手动签到失败：%s", user_id, e)
+            reason = sanitize_error(e)
+            await self.ctx.send.text(f"签到失败：{reason}", str(kwargs.get("stream_id") or ""))
+            return False, f"签到失败：{reason}", 1
         finally:
             await api.close()
 
@@ -835,8 +941,10 @@ class SklandSignPlugin(MaiBotPlugin):
             await self.ctx.send.text(text, str(kwargs.get("stream_id") or ""))
             return True, text, 2
         except Exception as e:
-            await self.ctx.send.text(f"查询失败：{e}", str(kwargs.get("stream_id") or ""))
-            return False, f"查询失败：{e}", 1
+            self.ctx.logger.warning("用户 %s 查询签到状态失败：%s", user_id, e)
+            reason = sanitize_error(e)
+            await self.ctx.send.text(f"查询失败：{reason}", str(kwargs.get("stream_id") or ""))
+            return False, f"查询失败：{reason}", 1
         finally:
             await api.close()
 
@@ -870,7 +978,7 @@ class SklandSignPlugin(MaiBotPlugin):
     )
     async def cmd_skland_set_time(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
-        if not self._is_super_admin(user_id):
+        if not await self._is_super_admin(user_id):
             await self.ctx.send.text("你没有权限执行此操作", str(kwargs.get("stream_id") or ""))
             return False, "无权限", 1
 
@@ -910,7 +1018,7 @@ class SklandSignPlugin(MaiBotPlugin):
     )
     async def cmd_skland_sign_info(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
-        if not self._is_super_admin(user_id):
+        if not await self._is_super_admin(user_id):
             await self.ctx.send.text("你没有权限执行此操作", str(kwargs.get("stream_id") or ""))
             return False, "无权限", 1
 
@@ -947,7 +1055,8 @@ class SklandSignPlugin(MaiBotPlugin):
                                 status_lines.append(f"{r.game}：失败（{r.error}）")
                     lines.append(f"用户 {display_name}（{auto_sign}）：{'；'.join(status_lines)}")
             except Exception as e:
-                lines.append(f"用户 {display_name}（{auto_sign}）：查询失败 {e}")
+                self.ctx.logger.warning("查询用户 %s 签到状态失败：%s", uid, e)
+                lines.append(f"用户 {display_name}（{auto_sign}）：查询失败（{sanitize_error(e)}）")
             finally:
                 await api.close()
 
@@ -961,7 +1070,7 @@ class SklandSignPlugin(MaiBotPlugin):
     )
     async def cmd_skland_auto_sign_test(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
-        if not self._is_super_admin(user_id):
+        if not await self._is_super_admin(user_id):
             await self.ctx.send.text("你没有权限执行此操作", str(kwargs.get("stream_id") or ""))
             return False, "无权限", 1
 
@@ -1021,7 +1130,8 @@ class SklandSignPlugin(MaiBotPlugin):
         detailed_description=(
             "当用户提供森空岛 token 并要求绑定（或要求开通签到）时调用。\n"
             "参数说明：\n"
-            "- user_id：string，必填。要绑定 token 的用户 QQ 号。\n"
+            "- user_id：string，可选。要绑定 token 的用户 QQ 号；留空或填当前消息发送者即本人，"
+            "代其他用户绑定仅限超级管理员。\n"
             "- token：string，必填。用户提供的森空岛 token，可以是完整 JSON "
             '（如 {"code":0,"data":{"content":"..."}}）或纯 Base64 字符串。'
         ),
@@ -1029,8 +1139,8 @@ class SklandSignPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="user_id",
                 param_type=ToolParamType.STRING,
-                description="要绑定 token 的用户 QQ 号",
-                required=True,
+                description="要绑定 token 的用户 QQ 号，留空默认为当前消息发送者；代他人绑定仅限超级管理员",
+                required=False,
             ),
             ToolParameterInfo(
                 name="token",
@@ -1041,11 +1151,11 @@ class SklandSignPlugin(MaiBotPlugin):
         ],
     )
     async def tool_skland_bind_token(self, user_id: str = "", token: str = "", **kwargs: Any) -> Dict[str, Any]:
-        del kwargs
-        uid = str(user_id or "").strip()
+        resolved = await self._resolve_tool_user_id(user_id, kwargs)
+        uid, perm_error = resolved
+        if perm_error:
+            return {"success": False, "error": perm_error}
         token_text = str(token or "").strip()
-        if not uid:
-            return {"success": False, "error": "缺少 user_id 参数"}
         if not token_text:
             return {"success": False, "error": "缺少 token 参数"}
 
@@ -1072,7 +1182,8 @@ class SklandSignPlugin(MaiBotPlugin):
                 "auto_sign_enabled": True,
             }
         except Exception as e:
-            return {"success": False, "error": f"绑定失败：{e}"}
+            self.ctx.logger.warning("用户 %s 工具绑定失败：%s", uid, e)
+            return {"success": False, "error": f"绑定失败：{sanitize_error(e)}"}
         finally:
             await api.close()
 
@@ -1082,22 +1193,22 @@ class SklandSignPlugin(MaiBotPlugin):
         detailed_description=(
             "当用户明确要求执行森空岛签到（如「帮我签到」「森空岛签到」）时调用。\n"
             "参数说明：\n"
-            "- user_id：string，必填。要执行签到的用户 QQ 号。"
+            "- user_id：string，可选。要执行签到的用户 QQ 号；留空或填当前消息发送者即本人，"
+            "代其他用户签到仅限超级管理员。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="user_id",
                 param_type=ToolParamType.STRING,
-                description="要执行签到的用户 QQ 号",
-                required=True,
+                description="要执行签到的用户 QQ 号，留空默认为当前消息发送者；代他人签到仅限超级管理员",
+                required=False,
             ),
         ],
     )
     async def tool_skland_sign_in(self, user_id: str = "", **kwargs: Any) -> Dict[str, Any]:
-        del kwargs
-        uid = str(user_id or "").strip()
-        if not uid:
-            return {"success": False, "error": "缺少 user_id 参数"}
+        uid, perm_error = await self._resolve_tool_user_id(user_id, kwargs)
+        if perm_error:
+            return {"success": False, "error": perm_error}
         assert self._user_manager is not None
         user_data = self._user_manager.get(uid)
         token = user_data.get("token")
@@ -1127,7 +1238,8 @@ class SklandSignPlugin(MaiBotPlugin):
                 ],
             }
         except Exception as e:
-            return {"success": False, "error": f"签到失败：{e}"}
+            self.ctx.logger.warning("用户 %s 工具签到失败：%s", uid, e)
+            return {"success": False, "error": f"签到失败：{sanitize_error(e)}"}
         finally:
             await api.close()
 
@@ -1137,22 +1249,22 @@ class SklandSignPlugin(MaiBotPlugin):
         detailed_description=(
             "当用户询问今日是否已签到、签到状态、绑定信息时调用。\n"
             "参数说明：\n"
-            "- user_id：string，必填。要查询的用户 QQ 号。"
+            "- user_id：string，可选。要查询的用户 QQ 号；留空或填当前消息发送者即本人，"
+            "查询其他用户仅限超级管理员。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="user_id",
                 param_type=ToolParamType.STRING,
-                description="要查询的用户 QQ 号",
-                required=True,
+                description="要查询的用户 QQ 号，留空默认为当前消息发送者；查询他人仅限超级管理员",
+                required=False,
             ),
         ],
     )
     async def tool_skland_sign_status(self, user_id: str = "", **kwargs: Any) -> Dict[str, Any]:
-        del kwargs
-        uid = str(user_id or "").strip()
-        if not uid:
-            return {"success": False, "error": "缺少 user_id 参数"}
+        uid, perm_error = await self._resolve_tool_user_id(user_id, kwargs)
+        if perm_error:
+            return {"success": False, "error": perm_error}
         assert self._user_manager is not None
         user_data = self._user_manager.get(uid)
         token = user_data.get("token")
@@ -1178,7 +1290,8 @@ class SklandSignPlugin(MaiBotPlugin):
                 "status": status,
             }
         except Exception as e:
-            return {"success": False, "error": f"查询失败：{e}"}
+            self.ctx.logger.warning("用户 %s 工具查询签到状态失败：%s", uid, e)
+            return {"success": False, "error": f"查询失败：{sanitize_error(e)}"}
         finally:
             await api.close()
 
@@ -1188,15 +1301,16 @@ class SklandSignPlugin(MaiBotPlugin):
         detailed_description=(
             "当用户要求开启或关闭自动签到（如「帮我开启自动签到」）时调用。\n"
             "参数说明：\n"
-            "- user_id：string，必填。目标用户 QQ 号。\n"
+            "- user_id：string，可选。目标用户 QQ 号；留空或填当前消息发送者即本人，"
+            "操作其他用户仅限超级管理员。\n"
             "- enable：boolean，必填。true 开启自动签到，false 关闭。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="user_id",
                 param_type=ToolParamType.STRING,
-                description="目标用户 QQ 号",
-                required=True,
+                description="目标用户 QQ 号，留空默认为当前消息发送者；操作他人仅限超级管理员",
+                required=False,
             ),
             ToolParameterInfo(
                 name="enable",
@@ -1207,10 +1321,9 @@ class SklandSignPlugin(MaiBotPlugin):
         ],
     )
     async def tool_skland_auto_sign(self, user_id: str = "", enable: bool = False, **kwargs: Any) -> Dict[str, Any]:
-        del kwargs
-        uid = str(user_id or "").strip()
-        if not uid:
-            return {"success": False, "error": "缺少 user_id 参数"}
+        uid, perm_error = await self._resolve_tool_user_id(user_id, kwargs)
+        if perm_error:
+            return {"success": False, "error": perm_error}
         assert self._user_manager is not None
         user_data = self._user_manager.get(uid)
         token = user_data.get("token")

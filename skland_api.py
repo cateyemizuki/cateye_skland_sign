@@ -151,7 +151,12 @@ class SklandAPI:
         headers: dict | None = None,
         json_data: dict | None = None,
     ) -> dict:
-        """Make HTTP request with retry logic"""
+        """Make HTTP request with retry logic.
+
+        校验 HTTP 状态码：仅对网络错误 / 超时 / HTTP 429 / 5xx 重试；
+        其余 4xx 属请求问题，重试无意义，直接失败；
+        非 2xx 不尝试把 HTML 错误页等当 JSON 解析。
+        """
         client = await self._get_client()
         last_error = None
 
@@ -161,11 +166,29 @@ class SklandAPI:
                     resp = await client.get(url, headers=headers)
                 else:
                     resp = await client.post(url, headers=headers, json=json_data)
-                return resp.json()
             except Exception as e:
+                # 网络错误 / 超时：可重试
                 last_error = e
                 if attempt < self.max_retries:
                     await self._sleep(1)
+                continue
+
+            # 校验 HTTP 状态码
+            if resp.status_code == 429 or resp.status_code >= 500:
+                # 限流 / 上游故障：可重试
+                last_error = Exception(f"上游服务暂时不可用（HTTP {resp.status_code}）")
+                if attempt < self.max_retries:
+                    await self._sleep(1)
+                continue
+            if resp.status_code >= 400:
+                # 其余 4xx：请求本身有问题，直接失败
+                raise Exception(f"请求被拒绝（HTTP {resp.status_code}）")
+
+            try:
+                return resp.json()
+            except Exception as e:
+                # 2xx 但响应体不是合法 JSON：重试无意义，直接失败
+                raise Exception(f"上游返回了无法解析的响应（HTTP {resp.status_code}）") from e
 
         raise last_error or Exception(f"Request failed after {self.max_retries} attempts")
 
@@ -306,7 +329,9 @@ class SklandAPI:
         )
 
         if response.get("code") != 1100:
-            raise Exception(f"Device ID generation failed: {response}")
+            # 完整响应仅记入 debug 日志，不进入异常文本（避免对外泄露上游响应结构）
+            logger.debug(f"Device ID generation failed: {json.dumps(response, ensure_ascii=False)}")
+            raise Exception("设备指纹生成失败，请稍后重试")
 
         self._did = f"B{response['detail']['deviceId']}"
         return self._did
@@ -600,19 +625,20 @@ class SklandAPI:
         并非安全漏洞；对已经签到的账号不会造成重复签到。
 
         Returns: ({game: signed_today}, nickname)
+
+        Raises:
+            查询失败（网络 / 凭证异常等）时直接向上抛出，由调用方区分
+            「未签到」与「查询失败」，不再静默误报为「今日未签到」。
         """
-        try:
-            results, nickname = await self.do_full_sign_in(user_token)
+        results, nickname = await self.do_full_sign_in(user_token)
 
-            status = {"arknights": False, "endfield": False}
+        status = {"arknights": False, "endfield": False}
 
-            for r in results:
-                if r.game == "明日方舟":
-                    # If already signed, message will say so
-                    status["arknights"] = self._is_signed_today(r)
-                elif r.game == "终末地":
-                    status["endfield"] = self._is_signed_today(r)
+        for r in results:
+            if r.game == "明日方舟":
+                # If already signed, message will say so
+                status["arknights"] = self._is_signed_today(r)
+            elif r.game == "终末地":
+                status["endfield"] = self._is_signed_today(r)
 
-            return status, nickname
-        except Exception:
-            return {"arknights": False, "endfield": False}, ""
+        return status, nickname

@@ -1,16 +1,60 @@
-# 运行时配置（Runner 生成，勿提交）
-/config.toml
+# ============================================================
+# MaiBot 插件仓库 .gitignore（模板 + 本插件规则合并）
+# 用法：从 MaiBot插件开发文档v1.3.0/ 根目录原样复制到插件根目录；
+#       若插件目录已有 .gitignore，合并规则而不是整体覆盖。
+# 目的：保证流程文档（UPLOAD_AGENT.md / ISSUE_SUBMISSION.md）、
+#       运行期生成的配置与数据、Python 缓存不进入 git 仓库。
+# ============================================================
 
-# 用户数据（含 token，勿提交）
+# ---- 流程 / 指导文档（禁止进仓库）----
+UPLOAD_AGENT.md
+ISSUE_SUBMISSION.md
+
+# ---- 运行期生成的配置与数据（宿主会在插件目录生成）----
+/config.toml
+/config_back/
+/data/
+*.log
+
+# ---- 用户数据（含 token，勿提交）----
 /data/
 
-# Python
+# ---- 本地工作区运行期产物（嵌套同名子目录，勿提交）----
+/cateye_skland_sign/
+
+# ---- 宿主安装回执与更新备份（发布安装模式写入，勿提交）----
+.maibot-release.json
+.update_backups/
+
+# ---- Python 缓存 / 构建产物 / 虚拟环境 ----
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
 .venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# 测试代码（本地开发用，不随插件上传）
+# ---- 测试 / 冒烟代码（本地开发用，不随插件上传）----
 test/
 tests/
+/test/
+/tests/
 test_*.py
 *_test.py
+smoke_test*.py
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

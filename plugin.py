@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from datetime import datetime, timezone, timedelta
 from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
@@ -33,7 +34,7 @@ TZ = timezone(timedelta(hours=8))
 # 配置版本（config_version）：与 _manifest.json 的 version 保持同步。
 # config_version 用于检查配置文件（config.toml）是否需要更新：
 # 插件升级后若配置结构发生变化，可对比该值触发配置迁移/重建。
-SUPPORTED_CONFIG_VERSION = "1.2.0"
+SUPPORTED_CONFIG_VERSION = "1.2.1"
 
 # 统一持久化目录的子文件夹名（data/plugins/cateye_skland_sign）。
 # 注意：manifest 的插件 ID 为 github.cateye.skland.sign（id 必须以点号/横线分隔），
@@ -224,10 +225,12 @@ class UserDataManager:
     以及旧版（amiyabot 时代）纯字符串 value（视为 token）。
     """
 
-    def __init__(self, data_file: str):
+    def __init__(self, data_file: str, logger: Optional[Any] = None):
         self.data_file = data_file
         self._data: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
+        # 可选日志器（插件的 ctx.logger）：仅用于数据文件异常告警，避免静默丢数据
+        self._logger = logger
         self.load()
 
     @staticmethod
@@ -262,7 +265,21 @@ class UserDataManager:
                 user = self._normalize_user(value)
                 if user["accounts"]:
                     self._data[str(uid)] = user
-        except Exception:
+        except Exception as e:
+            # 数据文件损坏 / 不可读：先备份原文件留待人工恢复，再从空数据开始。
+            # 若直接静默清空，下次 save() 会用空数据覆盖掉全部绑定，无从找回。
+            backup = f"{self.data_file}.corrupt-{datetime.now(TZ).strftime('%Y%m%d-%H%M%S')}"
+            try:
+                shutil.copy2(self.data_file, backup)
+                if self._logger:
+                    self._logger.warning(
+                        "数据文件 %s 解析失败（%s），已备份为 %s，将从空数据开始", self.data_file, e, backup
+                    )
+            except OSError:
+                if self._logger:
+                    self._logger.warning(
+                        "数据文件 %s 解析失败（%s），且备份失败，将从空数据开始", self.data_file, e
+                    )
             self._data = {}
 
     def _serialize(self) -> Dict[str, Any]:
@@ -287,8 +304,11 @@ class UserDataManager:
         os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
         # token 属敏感数据：写文件时收紧权限到仅属主可读写（0o600）。
         # POSIX 下严格生效；Windows 下 os.open 的 mode 仅尽力生效（不做加密混淆）。
+        # 原子写入：先写同目录临时文件并 fsync 落盘，再 os.replace 原子替换，
+        # 避免写入中途崩溃 / 断电把 users.json 截断成半份（下次启动解析失败会丢数据）。
+        tmp_path = f"{self.data_file}.tmp"
         try:
-            fd = os.open(self.data_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         except OSError:
             fd = None  # 极少数文件系统不支持时回退为普通写入，保证功能可用
         if fd is not None:
@@ -297,9 +317,19 @@ class UserDataManager:
                 os.fchmod(fd, 0o600)
             except (AttributeError, OSError):
                 pass  # Windows 无 fchmod
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-            return
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self.data_file)
+                return
+            except OSError:
+                try:
+                    os.unlink(tmp_path)  # 清理残留临时文件，下次写入重建
+                except OSError:
+                    pass
+                # 原子替换失败（个别文件系统不支持），回退为原地写入保证功能可用
         with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(data)
 
@@ -558,7 +588,7 @@ class SklandSignPlugin(MaiBotPlugin):
         self._migrate_legacy_data(data_dir)
 
         user_data_file = os.path.join(data_dir, "users.json")
-        self._user_manager = UserDataManager(user_data_file)
+        self._user_manager = UserDataManager(user_data_file, self.ctx.logger)
         # 兼容旧版数据：插件每次启动时后台为缺少森空岛昵称的用户自动补充昵称
         # （每日最多一次，不阻塞插件加载）
         self._last_backfill_date = self._load_backfill_date(data_dir)

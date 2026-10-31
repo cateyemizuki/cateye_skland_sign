@@ -32,7 +32,7 @@
 ```toml
 [plugin]
 enabled = true
-config_version = "1.2.0"
+config_version = "1.2.1"
 
 [auto_sign]
 time = "08:00"          # 每日自动签到时间（北京时间 HH:MM，分钟粒度，默认 08:00）
@@ -110,7 +110,7 @@ token 等同于账号登录凭证。消息有没有被识别成指令，决定�
 - 1.2.0 起 `users.json` 每个 QQ 下保存账号列表：`{"auto_sign": true, "accounts": [{"token", "nickname", "role_uids"}], "token", "nickname"}`。顶层 `token` / `nickname` 镜像第一个账号，降级回 1.1.x 时仍能签到第一个账号（降级后再写入会丢失其余账号）。1.1.x 的单账号格式与纯字符串旧格式在加载时自动转换，无需重新绑定。
 - 旧版数据中缺少 `nickname` 或 `role_uids` 的账号，插件会在**每次启动**与**每日自动签到执行时**后台自动查询并补充写入（`_backfill_nicknames()`，同一天最多执行一次，用 `last_nickname_backfill.json` 记录），不改变其 token 与自动签到开关。
 - **token 即登录凭证，请勿提交到公开仓库**，`.gitignore` 已包含 `/config.toml` 与 `/data/`。
-- **token 以明文保存在宿主机的 `users.json` 中**（插件不做加密混淆）：文件写入时权限收紧为仅属主可读写（POSIX 下严格生效，Windows 下尽力收紧），但任何能读取宿主机数据目录的进程仍可获得全部 token，**请保护好宿主机**。解绑即删除对应用户的全部数据。
+- **token 以明文保存在宿主机的 `users.json` 中**（插件不做加密混淆）：文件写入时权限收紧为仅属主可读写（POSIX 下严格生效，Windows 下尽力收紧），写入采用「临时文件 + `os.replace` 原子替换」，中途崩溃 / 断电不会损坏数据文件；若文件已损坏无法解析，加载时会先备份为 `users.json.corrupt-<时间戳>` 再重新开始。但任何能读取宿主机数据目录的进程仍可获得全部 token，**请保护好宿主机**。解绑即删除对应用户的全部数据。
 - 绑定 / 签到 / 状态查询失败时，机器人仅回复简短可读的原因，完整异常细节只写入插件日志，不对外暴露上游响应结构。
 
 ## 目录结构
@@ -137,3 +137,5 @@ cateye_skland_sign/
 ## 致谢与来源
 
 本插件的 `skland_api.py`（森空岛设备指纹生成、鉴权与签到 API 客户端）移植自 [Azincc/astrbot_plugin_skland](https://github.com/Azincc/astrbot_plugin_skland) 项目，感谢原作者的工作。
+
+感谢 [@Neomelt](https://github.com/Neomelt) 贡献多账号支持（v1.2.0，[PR #1](https://github.com/cateyemizuki/cateye_skland_sign/pull/1)）。

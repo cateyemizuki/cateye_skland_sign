@@ -1,8 +1,8 @@
 """森空岛（Skland）自动签到插件 — MaiBot v2 插件
 
 功能：
-- 用户通过指令或 LLM 工具绑定森空岛 token（支持明日方舟 / 终末地）。
-- 手动签到、查看签到状态、解绑。
+- 用户通过指令或 LLM 工具绑定森空岛 token（支持明日方舟 / 终末地），一个 QQ 可绑定多个森空岛账号。
+- 手动签到、查看签到状态、查看账号列表、按序号解绑。
 - 每日定时自动签到（北京时间，默认 06:00，仅记录日志不推送）。
 - LLM 工具：skland_help / skland_bind_token / skland_sign_in / skland_sign_status / skland_auto_sign。
 - token 获取引导采用链接方案：skland_help 工具只把获取链接及链接作用返回给大模型，
@@ -33,7 +33,7 @@ TZ = timezone(timedelta(hours=8))
 # 配置版本（config_version）：与 _manifest.json 的 version 保持同步。
 # config_version 用于检查配置文件（config.toml）是否需要更新：
 # 插件升级后若配置结构发生变化，可对比该值触发配置迁移/重建。
-SUPPORTED_CONFIG_VERSION = "1.1.3"
+SUPPORTED_CONFIG_VERSION = "1.2.0"
 
 # 统一持久化目录的子文件夹名（data/plugins/cateye_skland_sign）。
 # 注意：manifest 的插件 ID 为 github.cateye.skland.sign（id 必须以点号/横线分隔），
@@ -58,21 +58,33 @@ def build_token_tutorial(token_url: str) -> str:
 3. 点击帖子中的链接即可获取 token"""
 
 
+# token 等同于登录凭证：只有被识别为指令的消息不会进入大模型上下文，所以引导用户私聊、单独发指令
+BIND_NOTICE = (
+    "绑定注意：token 等同于账号登录凭证。\n"
+    "请私聊机器人，单独发一条「/森空岛绑定 <token>」，前面不要加别的字，不要用回复或引用；"
+    "不要在群里发，也不要转发含 token 的聊天记录，否则 token 会被群友看到，或作为聊天内容发给大模型。"
+)
+
+
 def build_help_text(token_url: str) -> str:
     """构造帮助/固定回复文案（链接来自配置）。"""
     return (
         build_token_tutorial(token_url)
+        + "\n\n"
+        + BIND_NOTICE
         + "\n\n可用指令：\n"
         "/森空岛 或 /森空岛帮助 —— 显示帮助与 token 获取教程\n"
-        "/森空岛绑定 <token> —— 绑定 token（支持完整 JSON 或纯 Base64 字符串）\n"
-        "/森空岛解绑 —— 解绑并停止自动签到\n"
-        "/森空岛签到 —— 手动签到\n"
-        "/森空岛状态 —— 查看今日签到状态\n"
-        "/森空岛自动签到 —— 开启 / 关闭自动签到\n"
+        "/森空岛绑定 <token> —— 绑定 token（支持完整 JSON 或纯 Base64 字符串；多个账号分别绑定即可）\n"
+        "/森空岛账号 —— 查看已绑定的账号及序号\n"
+        "/森空岛解绑 [序号|全部] —— 解绑账号（只绑了一个时可省略序号）\n"
+        "/森空岛签到 —— 为名下全部账号手动签到\n"
+        "/森空岛状态 —— 查看名下全部账号的今日签到状态\n"
+        "/森空岛自动签到 —— 开启 / 关闭自动签到（对名下全部账号生效）\n"
         "/森空岛定时 <时间> —— 设置自动签到时间（仅超级管理员，如：6点30分）\n"
         "/森空岛签到信息 —— 查看所有用户签到状态（仅超级管理员）\n"
         "/森空岛自动签到测试 —— 立即执行一次自动签到（仅超级管理员）\n\n"
-        "也可以直接对机器人说「森空岛怎么用 / 帮我绑定 / 帮我签到」，机器人会调用对应工具处理。"
+        "也可以直接对机器人说「森空岛怎么用 / 帮我签到」，机器人会调用对应工具处理；"
+        "绑定请用上面的指令，不要在对话里直接发 token。"
     )
 
 
@@ -193,14 +205,23 @@ class SklandSignConfig(PluginConfigBase):
 
 
 class UserDataManager:
-    """管理每个用户的 token 与自动签到开关。
+    """管理每个 QQ 用户绑定的森空岛账号（可绑定多个）与自动签到开关。
 
-    文件格式（users.json）：
+    文件格式（users.json，1.2.0 起）：
     {
-      "123456789": {"token": "...", "auto_sign": true, "nickname": "森空岛昵称"}
+      "123456789": {
+        "auto_sign": true,
+        "accounts": [
+          {"token": "...", "nickname": "森空岛昵称", "role_uids": ["游戏角色 uid", "..."]}
+        ],
+        "token": "...", "nickname": "..."
+      }
     }
-    兼容旧版（amiyabot 时代）格式：纯字符串 value 视为 token，
-    dict 仅保留 token / auto_sign / nickname 字段。
+    - auto_sign 按 QQ 用户统一开关，对其名下全部账号生效。
+    - role_uids 是该森空岛账号下的游戏角色 uid，用于识别「重复绑定同一账号」。
+    - 顶层 token / nickname 镜像第一个账号，降级到 1.1.x 时仍能签到第一个账号。
+    读取时兼容：1.1.x 单账号格式 {"token", "auto_sign", "nickname"}，
+    以及旧版（amiyabot 时代）纯字符串 value（视为 token）。
     """
 
     def __init__(self, data_file: str):
@@ -209,33 +230,61 @@ class UserDataManager:
         self._lock = asyncio.Lock()
         self.load()
 
+    @staticmethod
+    def _normalize_account(value: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, Mapping) or not value.get("token"):
+            return None
+        return {
+            "token": str(value["token"]),
+            "nickname": str(value.get("nickname") or "").strip(),
+            "role_uids": [str(u) for u in value.get("role_uids") or [] if u],
+        }
+
+    @classmethod
+    def _normalize_user(cls, value: Any) -> Dict[str, Any]:
+        """把任一历史格式的用户记录转换为当前格式。"""
+        if isinstance(value, str):  # amiyabot 时代：value 即 token
+            value = {"token": value}
+        if not isinstance(value, Mapping):
+            return {"auto_sign": False, "accounts": []}
+        raw_accounts = value["accounts"] if isinstance(value.get("accounts"), list) else [value]  # 1.1.x 单账号
+        accounts = [a for a in (cls._normalize_account(x) for x in raw_accounts) if a]
+        return {"auto_sign": bool(value.get("auto_sign", False)), "accounts": accounts}
+
     def load(self) -> None:
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                for uid, value in raw.items():
-                    if isinstance(value, str):
-                        self._data[str(uid)] = {"token": value, "auto_sign": False, "nickname": ""}
-                    elif isinstance(value, dict):
-                        self._data[str(uid)] = {
-                            "token": value.get("token"),
-                            "auto_sign": bool(value.get("auto_sign", False)),
-                            "nickname": str(value.get("nickname") or "").strip(),
-                        }
-            except Exception:
-                self._data = {}
-        else:
+        self._data = {}
+        if not os.path.exists(self.data_file):
+            return
+        try:
+            with open(self.data_file, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            for uid, value in raw.items():
+                user = self._normalize_user(value)
+                if user["accounts"]:
+                    self._data[str(uid)] = user
+        except Exception:
             self._data = {}
+
+    def _serialize(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for uid, user in self._data.items():
+            record: Dict[str, Any] = {"auto_sign": user["auto_sign"], "accounts": user["accounts"]}
+            if user["accounts"]:
+                # 镜像第一个账号，降级到 1.1.x 时仍可读取
+                record["token"] = user["accounts"][0]["token"]
+                record["nickname"] = user["accounts"][0]["nickname"]
+            out[uid] = record
+        return out
 
     async def save(self) -> None:
         async with self._lock:
+            # 在事件循环里序列化，避免写文件期间数据被其他协程修改
+            data = json.dumps(self._serialize(), ensure_ascii=False, indent=2)
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._save_sync)
+            await loop.run_in_executor(None, self._save_sync, data)
 
-    def _save_sync(self) -> None:
+    def _save_sync(self, data: str) -> None:
         os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
-        data = json.dumps(self._data, ensure_ascii=False, indent=2)
         # token 属敏感数据：写文件时收紧权限到仅属主可读写（0o600）。
         # POSIX 下严格生效；Windows 下 os.open 的 mode 仅尽力生效（不做加密混淆）。
         try:
@@ -243,51 +292,106 @@ class UserDataManager:
         except OSError:
             fd = None  # 极少数文件系统不支持时回退为普通写入，保证功能可用
         if fd is not None:
+            # os.open 的 mode 只在新建文件时生效；旧版本或迁移来的文件可能是 0o644，这里显式收紧
+            try:
+                os.fchmod(fd, 0o600)
+            except (AttributeError, OSError):
+                pass  # Windows 无 fchmod
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(data)
             return
         with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(data)
 
-    def get(self, user_id: str) -> Dict[str, Any]:
-        return self._data.get(str(user_id), {"token": None, "auto_sign": False, "nickname": ""})
+    def get_accounts(self, user_id: str) -> List[Dict[str, Any]]:
+        """用户名下已绑定的账号（副本）；未绑定时为空列表。"""
+        user = self._data.get(str(user_id))
+        return [dict(a) for a in user["accounts"]] if user else []
+
+    def get_auto_sign(self, user_id: str) -> bool:
+        user = self._data.get(str(user_id))
+        return bool(user and user["auto_sign"])
+
+    def account_label(self, user_id: str, index: int) -> str:
+        """账号显示名：森空岛昵称，缺失时为「账号N」（index 从 0 开始）。"""
+        accounts = self.get_accounts(user_id)
+        name = accounts[index]["nickname"] if 0 <= index < len(accounts) else ""
+        return name or f"账号{index + 1}"
 
     def get_nickname(self, user_id: str) -> str:
-        """返回用户绑定时保存的森空岛昵称；未保存或为空时回退为 QQ 号。"""
-        data = self.get(user_id)
-        return str(data.get("nickname") or "").strip() or str(user_id)
+        """用户显示名：名下各账号的森空岛昵称（顿号分隔）；都没有时回退为 QQ 号。"""
+        names = [a["nickname"] for a in self.get_accounts(user_id) if a["nickname"]]
+        return "、".join(names) or str(user_id)
 
-    async def set_token(self, user_id: str, token: str, nickname: str = "") -> None:
-        """绑定 token：绑定成功后默认开启自动签到，并保存森空岛昵称。"""
+    async def add_account(
+        self, user_id: str, token: str, nickname: str = "", role_uids: Optional[List[str]] = None
+    ) -> tuple[int, bool]:
+        """绑定一个森空岛账号，返回 (账号序号（从 0 开始）, 是否为新账号)。
+
+        与已绑定账号 token 相同、或游戏角色 uid 有交集时视为同一账号，只更新 token 与昵称；
+        绑定后默认开启该用户的自动签到。
+        """
         uid = str(user_id)
-        data = self.get(uid)
-        data["token"] = token
-        data["auto_sign"] = True  # 绑定成功后默认开启自动签到
-        data["nickname"] = str(nickname or "").strip()
-        self._data[uid] = data
+        user = self._data.setdefault(uid, {"auto_sign": False, "accounts": []})
+        new = {
+            "token": token,
+            "nickname": str(nickname or "").strip(),
+            "role_uids": [str(u) for u in role_uids or [] if u],
+        }
+        for i, acc in enumerate(user["accounts"]):
+            if acc["token"] == token or set(new["role_uids"]) & set(acc["role_uids"]):
+                new["nickname"] = new["nickname"] or acc["nickname"]
+                new["role_uids"] = new["role_uids"] or acc["role_uids"]
+                user["accounts"][i] = new
+                user["auto_sign"] = True
+                await self.save()
+                return i, False
+        user["accounts"].append(new)
+        user["auto_sign"] = True  # 绑定成功后默认开启自动签到
         await self.save()
+        return len(user["accounts"]) - 1, True
+
+    async def remove_account(self, user_id: str, index: int) -> Optional[Dict[str, Any]]:
+        """解绑指定序号（从 0 开始）的账号；最后一个账号解绑后删除该用户的全部数据。"""
+        uid = str(user_id)
+        user = self._data.get(uid)
+        if not user or not 0 <= index < len(user["accounts"]):
+            return None
+        removed = user["accounts"].pop(index)
+        if not user["accounts"]:
+            del self._data[uid]
+        await self.save()
+        return removed
 
     async def set_auto_sign(self, user_id: str, enabled: bool) -> None:
-        uid = str(user_id)
-        data = self.get(uid)
-        data["auto_sign"] = bool(enabled)
-        self._data[uid] = data
+        user = self._data.get(str(user_id))
+        if not user:
+            return
+        user["auto_sign"] = bool(enabled)
         await self.save()
 
-    def users_missing_nickname(self) -> List[str]:
-        """返回数据中缺少森空岛昵称的用户 QQ 号列表（兼容旧版数据自动补全）。"""
+    def accounts_missing_info(self) -> List[tuple[str, str]]:
+        """缺少森空岛昵称或游戏角色 uid 的账号，返回 (QQ 号, token) 列表（兼容旧版数据自动补全）。"""
         return [
-            uid
-            for uid, data in self._data.items()
-            if not str(data.get("nickname") or "").strip()
+            (uid, acc["token"])
+            for uid, user in self._data.items()
+            for acc in user["accounts"]
+            if not acc["nickname"] or not acc["role_uids"]
         ]
 
-    async def set_nickname(self, user_id: str, nickname: str) -> None:
-        """仅为指定用户补充森空岛昵称并保存（不改变 token / auto_sign）。"""
-        uid = str(user_id)
-        if uid not in self._data:
+    async def set_account_info(self, user_id: str, token: str, nickname: str, role_uids: List[str]) -> None:
+        """为 token 对应的账号补充昵称与角色 uid（不改变 token / auto_sign）。
+
+        按 token 定位而不是按序号，避免补充期间用户解绑导致序号错位。
+        """
+        user = self._data.get(str(user_id))
+        acc = next((a for a in user["accounts"] if a["token"] == token), None) if user else None
+        if acc is None:
             return
-        self._data[uid]["nickname"] = str(nickname or "").strip()
+        if nickname:
+            acc["nickname"] = str(nickname).strip()
+        if role_uids:
+            acc["role_uids"] = [str(u) for u in role_uids if u]
         await self.save()
 
     async def delete(self, user_id: str) -> None:
@@ -360,6 +464,29 @@ def format_sign_results(results: List[Any]) -> List[str]:
             else:
                 lines.append(f"[X] {r.game}：{r.nickname}（签到失败：{r.error}）")
     return lines
+
+
+def format_account_sign_lines(items: List[Dict[str, Any]]) -> List[str]:
+    """把多个账号的签到结果格式化为文本行；绑定了多个账号时每个账号前加「【昵称】」标题。"""
+    multi = len(items) > 1
+    lines: List[str] = []
+    for item in items:
+        if multi:
+            lines.append(f"【{item['label']}】")
+        if item["error"]:
+            lines.append(f"[X] 签到失败：{item['error']}")
+        elif not item["results"]:
+            lines.append("暂未查询到已绑定的游戏账号")
+        else:
+            lines.extend(format_sign_results(item["results"]))
+    return lines
+
+
+def format_status_line(status: Mapping[str, bool]) -> str:
+    return (
+        f"明日方舟：{'今日已签到' if status.get('arknights') else '今日未签到'}；"
+        f"终末地：{'今日已签到' if status.get('endfield') else '今日未签到'}"
+    )
 
 
 def sanitize_error(exc: BaseException) -> str:
@@ -458,10 +585,10 @@ class SklandSignPlugin(MaiBotPlugin):
     # ==================== 数据迁移 ====================
 
     async def _backfill_nicknames(self, force: bool = False) -> None:
-        """为旧版数据中没有森空岛昵称（nickname）的用户自动补充昵称。
+        """为旧版数据中缺少森空岛昵称（nickname）或游戏角色 uid（role_uids）的账号自动补充。
 
-        通过用户已保存的 token 调用森空岛接口查询其绑定列表，取第一个昵称写回
-        users.json（仅补充 nickname 字段，不改变 token / auto_sign）。
+        通过账号已保存的 token 调用森空岛接口查询其绑定列表，写回第一个昵称与全部角色 uid
+        （role_uids 用于识别重复绑定；不改变 token / auto_sign）。
 
         执行时机：
         - 插件每次启动（on_load）；
@@ -479,32 +606,22 @@ class SklandSignPlugin(MaiBotPlugin):
             return
         self._last_backfill_date = today
 
-        missing = self._user_manager.users_missing_nickname()
+        missing = self._user_manager.accounts_missing_info()
         if missing:
-            self.ctx.logger.info("发现 %d 个用户缺少森空岛昵称，开始自动补充", len(missing))
+            self.ctx.logger.info("发现 %d 个账号缺少森空岛昵称或角色信息，开始自动补充", len(missing))
             filled = 0
-            for uid in missing:
-                user_data = self._user_manager.get(uid)
-                token = user_data.get("token")
-                if not token:
-                    continue
-                api = SklandAPI()
+            for uid, token in missing:
                 try:
-                    auth_code = await api.get_authorization(token)
-                    cred = await api.get_credential(auth_code)
-                    bindings = await api.get_binding_list(cred)
-                    nickname = bindings[0].nickname if bindings else ""
-                    if nickname:
-                        await self._user_manager.set_nickname(uid, nickname)
+                    nickname, role_uids = await self._fetch_account_info(token)
+                    if nickname or role_uids:
+                        await self._user_manager.set_account_info(uid, token, nickname, role_uids)
                         filled += 1
                 except Exception as e:
                     self.ctx.logger.warning(
-                        "为旧版用户 %s 补充森空岛昵称失败（token 可能已过期），留待次日重试：%s", uid, e
+                        "为用户 %s 的账号补充森空岛信息失败（token 可能已过期），留待次日重试：%s", uid, e
                     )
-                finally:
-                    await api.close()
             if filled:
-                self.ctx.logger.info("已为 %d 个旧版用户补充森空岛昵称", filled)
+                self.ctx.logger.info("已为 %d 个账号补充森空岛信息", filled)
 
         self._save_backfill_date(data_dir, today)
 
@@ -678,28 +795,93 @@ class SklandSignPlugin(MaiBotPlugin):
             return False
 
     async def _perform_auto_sign(self) -> None:
-        """为所有开启自动签到的用户执行签到，仅记录日志，不推送消息。"""
+        """为所有开启自动签到的用户的全部账号执行签到，仅记录日志，不推送消息。"""
         assert self._user_manager is not None
         for user_id in self._user_manager.all_user_ids():
-            user_data = self._user_manager.get(user_id)
-            if not user_data.get("auto_sign"):
+            if not self._user_manager.get_auto_sign(user_id):
                 continue
-            token = user_data.get("token")
-            if not token:
-                continue
+            for item in await self._sign_all_accounts(user_id):
+                if item["error"]:
+                    self.ctx.logger.warning("[森空岛] 用户 %s 账号 %s 自动签到异常：%s", user_id, item["label"], item["error"])
+                elif not item["results"]:
+                    self.ctx.logger.info("[森空岛] 用户 %s 账号 %s 无游戏账号", user_id, item["label"])
+                else:
+                    for line in format_sign_results(item["results"]):
+                        self.ctx.logger.info("[森空岛] 用户 %s 账号 %s %s", user_id, item["label"], line)
 
+    # ==================== 森空岛请求（按账号） ====================
+
+    async def _fetch_account_info(self, token: str) -> tuple[str, List[str]]:
+        """用 token 查询绑定列表，返回 (森空岛昵称, 全部游戏角色 uid)；token 无效时抛异常。"""
+        api = SklandAPI()
+        try:
+            auth_code = await api.get_authorization(token)
+            cred = await api.get_credential(auth_code)
+            bindings = await api.get_binding_list(cred)
+            return (bindings[0].nickname if bindings else ""), [b.uid for b in bindings]
+        finally:
+            await api.close()
+
+    async def _sign_all_accounts(self, user_id: str) -> List[Dict[str, Any]]:
+        """为用户名下每个账号执行签到；单个账号失败不影响其他账号。
+
+        返回 [{"label": 账号显示名, "results": [SignInResult], "error": 对外可展示的原因或 None}]。
+        """
+        assert self._user_manager is not None
+        items: List[Dict[str, Any]] = []
+        for i, acc in enumerate(self._user_manager.get_accounts(user_id)):
+            label = self._user_manager.account_label(user_id, i)
             api = SklandAPI()
             try:
-                results, _ = await api.do_full_sign_in(token)
-                if not results:
-                    self.ctx.logger.info("[森空岛] 用户 %s 无游戏账号", user_id)
-                    continue
-                for line in format_sign_results(results):
-                    self.ctx.logger.info("[森空岛] 用户 %s %s", user_id, line)
+                results, _ = await api.do_full_sign_in(acc["token"])
+                items.append({"label": label, "results": results, "error": None})
             except Exception as e:
-                self.ctx.logger.warning("[森空岛] 用户 %s 自动签到异常：%s", user_id, e)
+                self.ctx.logger.warning("用户 %s 账号 %s 签到失败：%s", user_id, label, e)
+                items.append({"label": label, "results": [], "error": sanitize_error(e)})
             finally:
                 await api.close()
+        return items
+
+    async def _status_all_accounts(self, user_id: str) -> List[Dict[str, Any]]:
+        """查询用户名下每个账号的今日签到状态，返回 [{"label", "status", "error"}]。"""
+        assert self._user_manager is not None
+        items: List[Dict[str, Any]] = []
+        for i, acc in enumerate(self._user_manager.get_accounts(user_id)):
+            label = self._user_manager.account_label(user_id, i)
+            api = SklandAPI()
+            try:
+                status, _ = await api.check_sign_in_status(acc["token"])
+                items.append({"label": label, "status": status, "error": None})
+            except Exception as e:
+                self.ctx.logger.warning("用户 %s 账号 %s 查询签到状态失败：%s", user_id, label, e)
+                items.append({"label": label, "status": {}, "error": sanitize_error(e)})
+            finally:
+                await api.close()
+        return items
+
+    def _format_status_text(self, user_id: str, items: List[Dict[str, Any]]) -> str:
+        assert self._user_manager is not None
+        auto_sign = "已开启" if self._user_manager.get_auto_sign(user_id) else "未开启"
+        lines = [f"自动签到：{auto_sign}（每日 {self._get_auto_sign_time()}）"]
+        if len(items) == 1:
+            item = items[0]
+            lines.insert(0, f"用户：{item['label']}")
+            lines.extend(
+                [f"查询失败：{item['error']}"] if item["error"] else format_status_line(item["status"]).split("；")
+            )
+        else:
+            for item in items:
+                detail = f"查询失败：{item['error']}" if item["error"] else format_status_line(item["status"])
+                lines.append(f"【{item['label']}】{detail}")
+        return "\n".join(lines)
+
+    def _format_account_list(self, user_id: str) -> List[str]:
+        assert self._user_manager is not None
+        accounts = self._user_manager.get_accounts(user_id)
+        lines = [f"{i}. {self._user_manager.account_label(user_id, i - 1)}" for i in range(1, len(accounts) + 1)]
+        auto_sign = "已开启" if self._user_manager.get_auto_sign(user_id) else "未开启"
+        lines.append(f"自动签到：{auto_sign}（每日 {self._get_auto_sign_time()}，对以上全部账号生效）")
+        return lines
 
     # ==================== 工具函数（消息/用户解析） ====================
 
@@ -849,39 +1031,85 @@ class SklandSignPlugin(MaiBotPlugin):
             await self.ctx.send.text("无法获取你的用户标识，请重试", str(kwargs.get("stream_id") or ""))
             return False, "无法获取 user_id", 1
 
-        api = SklandAPI()
         try:
-            auth_code = await api.get_authorization(token)
-            cred = await api.get_credential(auth_code)
-            bindings = await api.get_binding_list(cred)
-            nickname = bindings[0].nickname if bindings else "未知用户"
-            assert self._user_manager is not None
-            await self._user_manager.set_token(user_id, token, nickname)
-            await self.ctx.send.text(
-                f"绑定成功！昵称：{nickname}\n每天{self._get_auto_sign_time()}自动签到",
-                str(kwargs.get("stream_id") or ""),
-            )
-            return True, f"绑定成功：{nickname}", 2
+            text = await self._bind_account(user_id, token)
         except Exception as e:
             self.ctx.logger.warning("用户 %s 绑定失败：%s", user_id, e)
             reason = sanitize_error(e)
             await self.ctx.send.text(f"绑定失败：{reason}", str(kwargs.get("stream_id") or ""))
             return False, f"绑定失败：{reason}", 1
-        finally:
-            await api.close()
+        await self.ctx.send.text(text, str(kwargs.get("stream_id") or ""))
+        return True, text, 2
+
+    async def _bind_account(self, user_id: str, token: str) -> str:
+        """绑定（或更新）一个账号，返回给用户的提示文案；token 无效时抛异常。"""
+        nickname, role_uids = await self._fetch_account_info(token)
+        nickname = nickname or "未知用户"
+        assert self._user_manager is not None
+        index, is_new = await self._user_manager.add_account(user_id, token, nickname, role_uids)
+        total = len(self._user_manager.get_accounts(user_id))
+        when = f"每天{self._get_auto_sign_time()}自动签到"
+        if not is_new:
+            return f"已更新账号 {nickname} 的 token（第 {index + 1} 个账号）\n{when}"
+        if total == 1:
+            return f"绑定成功！昵称：{nickname}\n{when}"
+        return f"绑定成功！昵称：{nickname}（第 {index + 1} 个账号，共 {total} 个）\n{when}，对全部账号生效"
+
+    @Command(
+        "skland_accounts",
+        description="查看已绑定的森空岛账号及序号",
+        pattern=r"^/?森空岛账号\s*$",
+    )
+    async def cmd_skland_accounts(self, **kwargs: Any) -> tuple[bool, str, int]:
+        user_id = self._extract_user_id(kwargs.get("message", {}))
+        stream_id = str(kwargs.get("stream_id") or "")
+        assert self._user_manager is not None
+        if not self._user_manager.get_accounts(user_id):
+            await self.ctx.send.text("您还未绑定 token，请使用「/森空岛绑定 <token>」", stream_id)
+            return False, "未绑定 token", 1
+        text = "已绑定的森空岛账号：\n" + "\n".join(self._format_account_list(user_id))
+        await self.ctx.send.text(text, stream_id)
+        return True, text, 2
 
     @Command(
         "skland_unbind",
-        description="解绑森空岛 token",
-        pattern=r"^/?森空岛解绑\s*$",
+        description="解绑森空岛账号（绑定多个账号时指定序号或「全部」）",
+        pattern=r"^/?森空岛解绑\s*(?P<target>\S*)\s*$",
     )
     async def cmd_skland_unbind(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
+        stream_id = str(kwargs.get("stream_id") or "")
+        target = str(kwargs.get("matched_groups", {}).get("target") or "").strip()
         assert self._user_manager is not None
-        if user_id:
+        accounts = self._user_manager.get_accounts(user_id) if user_id else []
+        if not accounts:
+            await self.ctx.send.text("你还没有绑定任何森空岛账号", stream_id)
+            return True, "无可解绑账号", 1
+
+        if target in ("全部", "所有", "all") or (not target and len(accounts) == 1):
             await self._user_manager.delete(user_id)
-        await self.ctx.send.text("解绑成功，已删除你的所有数据", str(kwargs.get("stream_id") or ""))
-        return True, "解绑成功", 1
+            await self.ctx.send.text("解绑成功，已删除你的所有数据", stream_id)
+            return True, "解绑成功", 1
+
+        if not target:
+            text = (
+                f"你绑定了 {len(accounts)} 个账号，请指定要解绑的序号：\n"
+                + "\n".join(self._format_account_list(user_id)[:-1])
+                + "\n\n例：/森空岛解绑 2；全部解绑：/森空岛解绑 全部"
+            )
+            await self.ctx.send.text(text, stream_id)
+            return False, "未指定序号", 1
+
+        if not target.isdigit() or not 1 <= int(target) <= len(accounts):
+            await self.ctx.send.text(f"序号无效，请填写 1~{len(accounts)}，或使用「/森空岛账号」查看序号", stream_id)
+            return False, "序号无效", 1
+
+        label = self._user_manager.account_label(user_id, int(target) - 1)
+        await self._user_manager.remove_account(user_id, int(target) - 1)
+        left = len(accounts) - 1
+        text = f"已解绑：{label}" + (f"，还剩 {left} 个账号" if left else "，已删除你的所有数据")
+        await self.ctx.send.text(text, stream_id)
+        return True, text, 1
 
     @Command(
         "skland_sign",
@@ -891,28 +1119,15 @@ class SklandSignPlugin(MaiBotPlugin):
     async def cmd_skland_sign(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
         assert self._user_manager is not None
-        user_data = self._user_manager.get(user_id)
-        token = user_data.get("token")
-        if not token:
+        if not self._user_manager.get_accounts(user_id):
             await self.ctx.send.text("您还未绑定 token，请使用「/森空岛绑定 <token>」", str(kwargs.get("stream_id") or ""))
             return False, "未绑定 token", 1
 
-        api = SklandAPI()
-        try:
-            results, _ = await api.do_full_sign_in(token)
-            if not results:
-                await self.ctx.send.text("暂未查询到已绑定的游戏账号", str(kwargs.get("stream_id") or ""))
-                return True, "无游戏账号", 1
-            lines = format_sign_results(results)
-            await self.ctx.send.text("\n".join(lines), str(kwargs.get("stream_id") or ""))
-            return True, "\n".join(lines), 2
-        except Exception as e:
-            self.ctx.logger.warning("用户 %s 手动签到失败：%s", user_id, e)
-            reason = sanitize_error(e)
-            await self.ctx.send.text(f"签到失败：{reason}", str(kwargs.get("stream_id") or ""))
-            return False, f"签到失败：{reason}", 1
-        finally:
-            await api.close()
+        items = await self._sign_all_accounts(user_id)
+        text = "\n".join(format_account_sign_lines(items))
+        await self.ctx.send.text(text, str(kwargs.get("stream_id") or ""))
+        ok = any(not item["error"] for item in items)
+        return ok, text, 2 if ok else 1
 
     @Command(
         "skland_status",
@@ -922,31 +1137,15 @@ class SklandSignPlugin(MaiBotPlugin):
     async def cmd_skland_status(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
         assert self._user_manager is not None
-        user_data = self._user_manager.get(user_id)
-        token = user_data.get("token")
-        if not token:
+        if not self._user_manager.get_accounts(user_id):
             await self.ctx.send.text("您还未绑定 token，请使用「/森空岛绑定 <token>」", str(kwargs.get("stream_id") or ""))
             return False, "未绑定 token", 1
 
-        api = SklandAPI()
-        try:
-            status, _ = await api.check_sign_in_status(token)
-            auto_sign = "已开启" if user_data.get("auto_sign") else "未开启"
-            text = (
-                f"用户：{self._user_manager.get_nickname(user_id)}\n"
-                f"自动签到：{auto_sign}（每日 {self._get_auto_sign_time()}）\n"
-                f"明日方舟：{'今日已签到' if status.get('arknights') else '今日未签到'}\n"
-                f"终末地：{'今日已签到' if status.get('endfield') else '今日未签到'}"
-            )
-            await self.ctx.send.text(text, str(kwargs.get("stream_id") or ""))
-            return True, text, 2
-        except Exception as e:
-            self.ctx.logger.warning("用户 %s 查询签到状态失败：%s", user_id, e)
-            reason = sanitize_error(e)
-            await self.ctx.send.text(f"查询失败：{reason}", str(kwargs.get("stream_id") or ""))
-            return False, f"查询失败：{reason}", 1
-        finally:
-            await api.close()
+        items = await self._status_all_accounts(user_id)
+        text = self._format_status_text(user_id, items)
+        await self.ctx.send.text(text, str(kwargs.get("stream_id") or ""))
+        ok = any(not item["error"] for item in items)
+        return ok, text, 2 if ok else 1
 
     @Command(
         "skland_auto_sign_command",
@@ -956,17 +1155,17 @@ class SklandSignPlugin(MaiBotPlugin):
     async def cmd_skland_auto_sign(self, **kwargs: Any) -> tuple[bool, str, int]:
         user_id = self._extract_user_id(kwargs.get("message", {}))
         assert self._user_manager is not None
-        user_data = self._user_manager.get(user_id)
-        token = user_data.get("token")
-        if not token:
+        accounts = self._user_manager.get_accounts(user_id)
+        if not accounts:
             await self.ctx.send.text("您还未绑定 token，请先使用「/森空岛绑定 <token>」", str(kwargs.get("stream_id") or ""))
             return False, "未绑定 token", 1
 
-        new_state = not bool(user_data.get("auto_sign", False))
+        new_state = not self._user_manager.get_auto_sign(user_id)
         await self._user_manager.set_auto_sign(user_id, new_state)
         status = "已启用" if new_state else "已关闭"
+        scope = f"，对名下 {len(accounts)} 个账号生效" if len(accounts) > 1 else ""
         await self.ctx.send.text(
-            f"【自动签到 {status}】\n每日 {self._get_auto_sign_time()} 自动签到（结果仅记录日志，不推送）",
+            f"【自动签到 {status}】\n每日 {self._get_auto_sign_time()} 自动签到（结果仅记录日志，不推送）{scope}",
             str(kwargs.get("stream_id") or ""),
         )
         return True, f"自动签到{status}", 2
@@ -1030,35 +1229,26 @@ class SklandSignPlugin(MaiBotPlugin):
 
         lines: List[str] = []
         for uid in user_ids:
-            user_data = self._user_manager.get(uid)
-            display_name = self._user_manager.get_nickname(uid)
-            token = user_data.get("token")
-            auto_sign = "自动" if user_data.get("auto_sign") else "手动"
-            if not token:
-                lines.append(f"用户 {display_name}：未绑定 token")
-                continue
-            api = SklandAPI()
-            try:
-                results, _ = await api.do_full_sign_in(token)
-                if not results:
-                    lines.append(f"用户 {display_name}（{auto_sign}）：无游戏账号")
-                else:
-                    status_lines = []
-                    for r in results:
-                        if r.success:
-                            status_lines.append(f"{r.game}：成功（{'，'.join(r.awards) if r.awards else '无奖励'}）")
+            auto_sign = "自动" if self._user_manager.get_auto_sign(uid) else "手动"
+            for item in await self._sign_all_accounts(uid):
+                prefix = f"用户 {item['label']}（{auto_sign}）"
+                if item["error"]:
+                    lines.append(f"{prefix}：查询失败（{item['error']}）")
+                    continue
+                if not item["results"]:
+                    lines.append(f"{prefix}：无游戏账号")
+                    continue
+                status_lines = []
+                for r in item["results"]:
+                    if r.success:
+                        status_lines.append(f"{r.game}：成功（{'，'.join(r.awards) if r.awards else '无奖励'}）")
+                    else:
+                        err_lower = (r.error or "").lower()
+                        if any(k in err_lower for k in ("已签到", "重复", "请勿重复", "今日已")):
+                            status_lines.append(f"{r.game}：今日已签到")
                         else:
-                            err_lower = (r.error or "").lower()
-                            if any(k in err_lower for k in ("已签到", "重复", "请勿重复", "今日已")):
-                                status_lines.append(f"{r.game}：今日已签到")
-                            else:
-                                status_lines.append(f"{r.game}：失败（{r.error}）")
-                    lines.append(f"用户 {display_name}（{auto_sign}）：{'；'.join(status_lines)}")
-            except Exception as e:
-                self.ctx.logger.warning("查询用户 %s 签到状态失败：%s", uid, e)
-                lines.append(f"用户 {display_name}（{auto_sign}）：查询失败（{sanitize_error(e)}）")
-            finally:
-                await api.close()
+                            status_lines.append(f"{r.game}：失败（{r.error}）")
+                lines.append(f"{prefix}：{'；'.join(status_lines)}")
 
         await self._send_forward_or_text(str(kwargs.get("stream_id") or ""), "森空岛签到状态", lines)
         return True, "签到信息已发送", 2
@@ -1112,13 +1302,16 @@ class SklandSignPlugin(MaiBotPlugin):
                 "链接作用：{purpose}\n"
                 "{link_note}。\n"
                 "获取步骤：使用浏览器打开链接 → 跳转到森空岛登录并登录 → "
-                "点击帖子中的链接即可获取 token。\n\n"
+                "点击帖子中的链接即可获取 token。\n"
+                "回答时务必提醒用户：{notice}不要把 token 直接发在对话里让你代为绑定。\n\n"
                 "可用指令：\n"
-                "/森空岛绑定 <token> —— 绑定 token\n"
-                "/森空岛签到 —— 手动签到\n"
-                "/森空岛状态 —— 查看今日签到状态\n"
+                "/森空岛绑定 <token> —— 绑定 token（有多个森空岛账号时分别绑定）\n"
+                "/森空岛账号 —— 查看已绑定的账号及序号\n"
+                "/森空岛解绑 [序号|全部] —— 解绑账号\n"
+                "/森空岛签到 —— 为全部账号手动签到\n"
+                "/森空岛状态 —— 查看全部账号的今日签到状态\n"
                 "/森空岛自动签到 —— 开启 / 关闭自动签到"
-            ).format(url=token_url, purpose=TOKEN_URL_PURPOSE, link_note=link_note),
+            ).format(url=token_url, purpose=TOKEN_URL_PURPOSE, link_note=link_note, notice=BIND_NOTICE.replace("\n", "")),
             "token_url": token_url,
             "token_url_purpose": TOKEN_URL_PURPOSE,
             "link_sent_to_user": link_sent,
@@ -1129,6 +1322,7 @@ class SklandSignPlugin(MaiBotPlugin):
         brief_description="为用户绑定森空岛 token",
         detailed_description=(
             "当用户提供森空岛 token 并要求绑定（或要求开通签到）时调用。\n"
+            "同一用户可以绑定多个森空岛账号（每次调用绑定一个）；再次绑定同一账号会更新它的 token。\n"
             "参数说明：\n"
             "- user_id：string，可选。要绑定 token 的用户 QQ 号；留空或填当前消息发送者即本人，"
             "代其他用户绑定仅限超级管理员。\n"
@@ -1153,8 +1347,8 @@ class SklandSignPlugin(MaiBotPlugin):
     async def tool_skland_bind_token(self, user_id: str = "", token: str = "", **kwargs: Any) -> Dict[str, Any]:
         resolved = await self._resolve_tool_user_id(user_id, kwargs)
         uid, perm_error = resolved
-        if perm_error:
-            return {"success": False, "error": perm_error}
+        if perm_error or uid is None:
+            return {"success": False, "error": perm_error or "无法确定目标用户"}
         token_text = str(token or "").strip()
         if not token_text:
             return {"success": False, "error": "缺少 token 参数"}
@@ -1163,29 +1357,19 @@ class SklandSignPlugin(MaiBotPlugin):
         if not real_token:
             return {"success": False, "error": "无法提取有效 token，请检查输入内容"}
 
-        api = SklandAPI()
         try:
-            auth_code = await api.get_authorization(real_token)
-            cred = await api.get_credential(auth_code)
-            bindings = await api.get_binding_list(cred)
-            nickname = bindings[0].nickname if bindings else "未知用户"
-            assert self._user_manager is not None
-            await self._user_manager.set_token(uid, real_token, nickname)
-            return {
-                "success": True,
-                "content": (
-                    f"用户 {nickname}（QQ:{uid}）绑定成功。绑定后已默认开启每日自动签到，"
-                    f"请回复用户：绑定成功！昵称：{nickname}，每天{self._get_auto_sign_time()}自动签到。"
-                ),
-                "user_id": uid,
-                "nickname": nickname,
-                "auto_sign_enabled": True,
-            }
+            text = await self._bind_account(uid, real_token)
         except Exception as e:
             self.ctx.logger.warning("用户 %s 工具绑定失败：%s", uid, e)
             return {"success": False, "error": f"绑定失败：{sanitize_error(e)}"}
-        finally:
-            await api.close()
+        assert self._user_manager is not None
+        return {
+            "success": True,
+            "content": f"QQ:{uid} 绑定完成，已默认开启每日自动签到。请用自己的话把结果告诉用户：{text}",
+            "user_id": uid,
+            "accounts": [a["nickname"] for a in self._user_manager.get_accounts(uid)],
+            "auto_sign_enabled": True,
+        }
 
     @Tool(
         "skland_sign_in",
@@ -1207,41 +1391,31 @@ class SklandSignPlugin(MaiBotPlugin):
     )
     async def tool_skland_sign_in(self, user_id: str = "", **kwargs: Any) -> Dict[str, Any]:
         uid, perm_error = await self._resolve_tool_user_id(user_id, kwargs)
-        if perm_error:
-            return {"success": False, "error": perm_error}
+        if perm_error or uid is None:
+            return {"success": False, "error": perm_error or "无法确定目标用户"}
         assert self._user_manager is not None
-        user_data = self._user_manager.get(uid)
-        token = user_data.get("token")
-        if not token:
+        if not self._user_manager.get_accounts(uid):
             return {"success": False, "error": f"用户 {self._user_manager.get_nickname(uid)} 还未绑定 token，请先让用户绑定"}
 
-        api = SklandAPI()
-        try:
-            results, nickname = await api.do_full_sign_in(token)
-            if not results:
-                return {"success": True, "content": f"用户 {self._user_manager.get_nickname(uid)} 暂未查询到已绑定的游戏账号", "user_id": uid}
-            lines = format_sign_results(results)
-            return {
-                "success": True,
-                "content": f"用户 {self._user_manager.get_nickname(uid)} 的签到结果：\n" + "\n".join(lines),
-                "user_id": uid,
-                "nickname": nickname,
-                "results": [
-                    {
-                        "game": r.game,
-                        "nickname": r.nickname,
-                        "success": r.success,
-                        "awards": r.awards,
-                        "error": r.error,
-                    }
-                    for r in results
-                ],
-            }
-        except Exception as e:
-            self.ctx.logger.warning("用户 %s 工具签到失败：%s", uid, e)
-            return {"success": False, "error": f"签到失败：{sanitize_error(e)}"}
-        finally:
-            await api.close()
+        items = await self._sign_all_accounts(uid)
+        if all(item["error"] for item in items):
+            return {"success": False, "error": "签到失败：" + "；".join(f"{i['label']}：{i['error']}" for i in items)}
+        return {
+            "success": True,
+            "content": f"用户 {self._user_manager.get_nickname(uid)} 的签到结果：\n" + "\n".join(format_account_sign_lines(items)),
+            "user_id": uid,
+            "accounts": [
+                {
+                    "account": item["label"],
+                    "error": item["error"],
+                    "results": [
+                        {"game": r.game, "nickname": r.nickname, "success": r.success, "awards": r.awards, "error": r.error}
+                        for r in item["results"]
+                    ],
+                }
+                for item in items
+            ],
+        }
 
     @Tool(
         "skland_sign_status",
@@ -1263,37 +1437,22 @@ class SklandSignPlugin(MaiBotPlugin):
     )
     async def tool_skland_sign_status(self, user_id: str = "", **kwargs: Any) -> Dict[str, Any]:
         uid, perm_error = await self._resolve_tool_user_id(user_id, kwargs)
-        if perm_error:
-            return {"success": False, "error": perm_error}
+        if perm_error or uid is None:
+            return {"success": False, "error": perm_error or "无法确定目标用户"}
         assert self._user_manager is not None
-        user_data = self._user_manager.get(uid)
-        token = user_data.get("token")
-        if not token:
+        if not self._user_manager.get_accounts(uid):
             return {"success": False, "error": f"用户 {self._user_manager.get_nickname(uid)} 还未绑定 token"}
 
-        api = SklandAPI()
-        try:
-            status, nickname = await api.check_sign_in_status(token)
-            auto_sign = "已开启" if user_data.get("auto_sign") else "未开启"
-            content = (
-                f"用户：{self._user_manager.get_nickname(uid)}\n"
-                f"自动签到：{auto_sign}（每日 {self._get_auto_sign_time()}）\n"
-                f"明日方舟：{'今日已签到' if status.get('arknights') else '今日未签到'}\n"
-                f"终末地：{'今日已签到' if status.get('endfield') else '今日未签到'}"
-            )
-            return {
-                "success": True,
-                "content": content,
-                "user_id": uid,
-                "nickname": nickname,
-                "auto_sign_enabled": bool(user_data.get("auto_sign")),
-                "status": status,
-            }
-        except Exception as e:
-            self.ctx.logger.warning("用户 %s 工具查询签到状态失败：%s", uid, e)
-            return {"success": False, "error": f"查询失败：{sanitize_error(e)}"}
-        finally:
-            await api.close()
+        items = await self._status_all_accounts(uid)
+        if all(item["error"] for item in items):
+            return {"success": False, "error": "查询失败：" + "；".join(f"{i['label']}：{i['error']}" for i in items)}
+        return {
+            "success": True,
+            "content": self._format_status_text(uid, items),
+            "user_id": uid,
+            "auto_sign_enabled": self._user_manager.get_auto_sign(uid),
+            "accounts": [{"account": i["label"], "status": i["status"], "error": i["error"]} for i in items],
+        }
 
     @Tool(
         "skland_auto_sign",
@@ -1322,12 +1481,10 @@ class SklandSignPlugin(MaiBotPlugin):
     )
     async def tool_skland_auto_sign(self, user_id: str = "", enable: bool = False, **kwargs: Any) -> Dict[str, Any]:
         uid, perm_error = await self._resolve_tool_user_id(user_id, kwargs)
-        if perm_error:
-            return {"success": False, "error": perm_error}
+        if perm_error or uid is None:
+            return {"success": False, "error": perm_error or "无法确定目标用户"}
         assert self._user_manager is not None
-        user_data = self._user_manager.get(uid)
-        token = user_data.get("token")
-        if not token:
+        if not self._user_manager.get_accounts(uid):
             return {"success": False, "error": f"用户 {self._user_manager.get_nickname(uid)} 还未绑定 token，无法开启自动签到"}
 
         await self._user_manager.set_auto_sign(uid, to_bool(enable))

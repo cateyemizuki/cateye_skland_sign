@@ -23,7 +23,7 @@
 2. 重启 MaiBot，或在 WebUI 插件中心安装。
 3. 插件依赖 `httpx`、`pycryptodome`、`tomlkit`，已声明于 `_manifest.json`，Host 会自动安装。
 
-> 兼容性声明：兼容 **MaiBot 1.2.x 与 1.3.x**（`host_application` `1.0.0 ~ 1.99.99`，`sdk` `2.0.0 ~ 2.99.99`，Manifest v2）。
+> 兼容性声明：兼容 **MaiBot 1.2.x 与 1.3.x**（`host_application` `1.0.0 ~ 1.3.99`，`sdk` `2.0.0 ~ 2.99.99`，Manifest v2）。
 
 ## 配置说明
 
